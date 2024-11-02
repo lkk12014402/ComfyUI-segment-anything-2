@@ -33,7 +33,7 @@ class DownloadAndLoadSAM2Model:
             "segmentor": (
                     ['single_image','video', 'automaskgenerator'],
                     ),
-            "device": (['cuda', 'cpu', 'mps'], ),
+            "device": (['hpu', 'cuda', 'cpu', 'mps'], ),
             "precision": ([ 'fp16','bf16','fp32'],
                     {
                     "default": 'fp16'
@@ -57,7 +57,7 @@ class DownloadAndLoadSAM2Model:
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
         dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[precision]
-        device = {"cuda": torch.device("cuda"), "cpu": torch.device("cpu"), "mps": torch.device("mps")}[device]
+        device = {"hpu": torch.device("hpu"), "cuda": torch.device("cuda"), "cpu": torch.device("cpu"), "mps": torch.device("mps")}[device]
 
         download_path = os.path.join(folder_paths.models_dir, "sam2")
         if precision != 'fp32' and "2.1" in model:
@@ -305,6 +305,7 @@ class Sam2Segmentation:
             model.model.to(device)
         
         autocast_condition = not mm.is_device_mps(device)
+        print(f"Sam2Segmentation autocast device:{mm.get_autocast_device(device)} and dtype {dtype}  and autocast_condition:{autocast_condition}")
         with torch.autocast(mm.get_autocast_device(device), dtype=dtype) if autocast_condition else nullcontext():
             if segmentor == 'single_image':
                 image_np = (image.contiguous() * 255).byte().numpy()
