@@ -37,6 +37,15 @@ class SAM2ImagePredictor:
             the maximum area of fill_hole_area in low_res_masks.
         """
         super().__init__()
+        try:
+            import habana_frameworks.torch as ht
+        except ImportError as error:
+            error.msg = f"Could not import habana_frameworks.torch. {error.msg}."
+            raise error
+        self.ht = ht
+        self.hpu_stream = ht.hpu.Stream()
+        self.cache = {}
+
         self.model = sam_model
         self._transforms = SAM2Transforms(
             resolution=self.model.image_size,
@@ -79,7 +88,7 @@ class SAM2ImagePredictor:
         self.reset_predictor()
         # Transform the image to the form expected by the model
         if isinstance(image, np.ndarray):
-            #logging.info("For numpy array image, we assume (HxWxC) format")
+            # logging.info("For numpy array image, we assume (HxWxC) format")
             self._orig_hw = [image.shape[:2]]
         elif isinstance(image, Image):
             w, h = image.size
@@ -93,8 +102,29 @@ class SAM2ImagePredictor:
         assert (
             len(input_image.shape) == 4 and input_image.shape[1] == 3
         ), f"input_image must be of size 1x3xHxW, got {input_image.shape}"
-        #logging.info("Computing image embeddings for the provided image...")
-        backbone_out = self.model.forward_image(input_image)
+        # logging.info("Computing image embeddings for the provided image...")
+
+        inputs = [input_image]
+        h = self.ht.hpu.graphs.input_hash(inputs)
+        cached = self.cache.get(h)
+        if cached is None:
+            # Capture the graph and cache it
+            with self.ht.hpu.stream(self.hpu_stream):
+                graph = self.ht.hpu.HPUGraph()
+                graph.capture_begin()
+                backbone_out = self.model.forward_image(input_image)
+                graph.capture_end()
+                graph_inputs = inputs
+                graph_outputs = backbone_out
+                self.cache[h] = self.ht.hpu.graphs.CachedParams(graph_inputs, graph_outputs, graph)
+        else:
+            # Replay the cached graph with updated inputs
+            self.ht.hpu.graphs.copy_to(cached.graph_inputs, inputs)
+            cached.graph.replay()
+            self.ht.core.hpu.default_stream().synchronize()
+            backbone_out = cached.graph_outputs
+
+        # backbone_out = self.model.forward_image(input_image)
         _, vision_feats, _, _ = self.model._prepare_backbone_features(backbone_out)
         # Add no_mem_embed, which is added to the lowest rest feat. map during training on videos
         if self.model.directly_add_no_mem_embed:
@@ -106,7 +136,7 @@ class SAM2ImagePredictor:
         ][::-1]
         self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
         self._is_image_set = True
-        #logging.info("Image embeddings computed.")
+        # logging.info("Image embeddings computed.")
 
     @torch.no_grad()
     def set_image_batch(
