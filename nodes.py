@@ -421,6 +421,85 @@ class Sam2Segmentation:
         mask_tensor = torch.stack(out_list, dim=0).cpu().float()
         return (mask_tensor,)
 
+
+from torchvision import transforms
+import io
+import base64
+import requests
+from requests.exceptions import RequestException
+
+class Sam2SegmentationEndpoint:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "sam2_model": ("SAM2MODEL", ),
+                "image": ("IMAGE", ),
+                "keep_model_loaded": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "coordinates_positive": ("STRING", {"forceInput": True}),
+                "coordinates_negative": ("STRING", {"forceInput": True}),
+                "bboxes": ("BBOX", ),
+                "individual_objects": ("BOOLEAN", {"default": False}),
+                "endpoint": ("STRING", {"default": "http://localhost:9379/v1/sam2seg"}),
+                "mask": ("MASK", ),
+            },
+        }
+    RETURN_TYPES = ("MASK", )
+    RETURN_NAMES =("mask", )
+    FUNCTION = "segment"
+    CATEGORY = "SAM2"
+
+    def segment(self, image, sam2_model, keep_model_loaded, endpoint, coordinates_positive=None, coordinates_negative=None,
+                individual_objects=False, bboxes=None, mask=None):
+
+        pil_image = transforms.ToPILImage()(image.squeeze(0).permute(2,0,1))
+        buffered = io.BytesIO()
+        pil_image.save(buffered, format="png", quality=75)
+        img_bytes = buffered.getvalue()
+        img_base64 = base64.b64encode(img_bytes).decode('utf-8')
+
+        req = {"image": img_base64,
+            "keep_model_loaded": keep_model_loaded,
+            "coordinates_positive": coordinates_positive,
+            "coordinates_negative": coordinates_negative,
+            "individual_objects": individual_objects,
+            # "bboxes": bboxes,
+            "bboxes": "" if bboxes is None else bboxes,
+            "mask": base64.b64encode(mask.numpy().tobytes()).decode('utf-8'),
+            "mask_shape": mask.shape
+        }
+
+        try:
+            res = requests.post(
+                f"{endpoint}",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(req),
+            )
+            res.raise_for_status()
+            res = res.json()
+        except RequestException as e:
+            raise Exception(f"An unexpected error occurred: {str(e)}")
+
+        output_mask_str = res["output_mask"]
+        mask_shape = res["mask_shape"]
+
+        """
+        mask_numpy = np.frombuffer(base64.b64decode(output_mask_str),
+            dtype=np.float32
+        ).reshape(mask_shape)
+        print(mask_numpy.shape)
+
+        mask_tensor = torch.from_numpy(mask_numpy)
+        """
+        mask_tensor = torch.frombuffer(base64.b64decode(output_mask_str),
+            dtype=torch.float32
+        ).reshape(mask_shape)
+
+        return (mask_tensor,)
+
+
 class Sam2VideoSegmentationAddPoints:
     @classmethod
     def IS_CHANGED(s): # TODO: smarter reset?
@@ -752,6 +831,7 @@ class Sam2AutoSegmentation:
 NODE_CLASS_MAPPINGS = {
     "DownloadAndLoadSAM2Model": DownloadAndLoadSAM2Model,
     "Sam2Segmentation": Sam2Segmentation,
+    "Sam2SegmentationEndpoint": Sam2SegmentationEndpoint,
     "Florence2toCoordinates": Florence2toCoordinates,
     "Sam2AutoSegmentation": Sam2AutoSegmentation,
     "Sam2VideoSegmentationAddPoints": Sam2VideoSegmentationAddPoints,
@@ -760,6 +840,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadAndLoadSAM2Model": "(Down)Load SAM2Model",
     "Sam2Segmentation": "Sam2Segmentation",
+    "Sam2SegmentationEndpoint": "Sam2SegmentationEndpoint",
     "Florence2toCoordinates": "Florence2 Coordinates",
     "Sam2AutoSegmentation": "Sam2AutoSegmentation",
     "Sam2VideoSegmentationAddPoints": "Sam2VideoSegmentationAddPoints",
